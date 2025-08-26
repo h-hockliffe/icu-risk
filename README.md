@@ -1,5 +1,5 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/h-hockliffe/icu-risk/ci.yaml?branch=main)](https://github.com/h-hockliffe/icu-risk/actions)
-[![Reproducible](https://img.shields.io/badge/reproducible-Docker%20%2B%20renv-blue)](#reproducibility)
+[![Reproducible](https://img.shields.io/badge/reproducible-renv-blue)](#reproducibility)
 # ICU Mortality — Bayesian Cause-Specific Baseline Model (INLA) with Cox & Fine–Gray Comparators
 
 
@@ -9,7 +9,7 @@ A reproducible workflow for developing and validating **competing-risk ICU morta
 -   **Cox frailty** comparators,
 -   **Fine–Gray** subdistribution models (used for descriptive comparisons).
 
-Includes a `targets` pipeline, Quarto report, Docker image, GitHub Actions CI, and a test suite.
+Includes a `targets` pipeline, Quarto report, GitHub Actions CI, and a test suite.
 
 ------------------------------------------------------------------------
 
@@ -17,7 +17,7 @@ Includes a `targets` pipeline, Quarto report, Docker image, GitHub Actions CI, a
 
 -   **Creatinine vs eGFR collinearity**: Primary models use **log-eGFR only**; creatinine enters only via a **residualised** sensitivity term (orthogonal to eGFR, age, sex).
 -   **Shared age centering**: A shared `age_mean` per dataset ensures aligned transforms across engines.
--   **Interval selection**: early-stops when cutpoints stabilize and uses a bounded iteration cap.
+-   **Interval selection**: early-stops when cutpoints stabilise and uses a bounded iteration cap.
 -   **Index-stay dataset**: **No administrative right-censoring** (earliest ICU stay per patient).
 -   **Fine–Gray usage**: FG reported **descriptively**; primary inference is **cause-specific**.
 -   **Time-dependent AUC** and **Brier score** at specified horizons, **averaged across imputations** (bootstrap CIs **optional** when enabled).
@@ -64,53 +64,18 @@ Includes a `targets` pipeline, Quarto report, Docker image, GitHub Actions CI, a
 
 
 ## Provenance & timelines
+- Report submitted: 18 Aug 2025. Slides submitted: 25 Aug 2025. Viva: 29 Aug 2025.
+- This public repository was created after report submission for reproducibility.
+- Analysis code matches the Appendix version submitted on 18 Aug (non-analytic files like README/CI may differ).
+- Integrity: see [`SHA256SUMS.txt`](./SHA256SUMS.txt) at the repo root for file checksums.
 
-- Report submitted: **18 Aug 2025**. Slides submitted: **25 Aug 2025**. Viva: **29 Aug 2025**.
-- This public repository was created **after** report submission for reproducibility.  
-  The code here is **identical** to the Appendix version submitted on 18 Aug.
-- Archival asset: **`appendix_code_2025-08-18.zip`** attached to release  
-  **“Thesis snapshot — 18 Aug 2025”** (tag `v1.0-thesis-2025-08-18`).
-- SHA256 checksum of the archive (verifies identity):
 
 
 ------------------------------------------------------------------------
 
 ## Quick start
 
-### Option A: Docker
-
-Mount your Google Drive volume into the container and point `RAW_FILE` at the mounted path.
-
-**Windows (Google Drive for desktop is usually `G:`):**
-
-``` bash
-# From repo root
-docker build -t icu-risk .
-
-docker run --rm -it \
-  -v "$PWD":/workspace \
-  -v "G:":/gdrive \
-  -w /workspace \
-  -e RAW_FILE="/gdrive/Shared drives/<TEAM_OR_PROJECT>/<FOLDER>/FINAL BAYESIAN_07042025 (1).xlsx" \
-  icu-risk R -e "targets::tar_make(thesis_html)"
-```
-
-**macOS (Google Drive mounts under /Volumes/GoogleDrive):**
-
-``` bash
-docker build -t icu-risk .
-
-docker run --rm -it \
-  -v "$PWD":/workspace \
-  -v "/Volumes/GoogleDrive":/gdrive \
-  -w /workspace \
-  -e RAW_FILE="/gdrive/Shared drives/<TEAM_OR_PROJECT>/<FOLDER>/FINAL BAYESIAN_07042025 (1).xlsx" \
-  icu-risk R -e "targets::tar_make(thesis_html)"
-```
-
-The rendered HTML appears in the repo root as `thesis.html`.
-
-### Option B: Local R with renv
+### Local R with renv
 
 Point `RAW_FILE` at the **Google Drive–mounted path** and run the pipeline.
 
@@ -126,6 +91,8 @@ Sys.setenv(RAW_FILE = "G:/Shared drives/<TEAM_OR_PROJECT>/<FOLDER>/FINAL BAYESIA
 
 # Build the full pipeline and render the thesis
 targets::tar_make(thesis_html)
+# …or just build model artefacts without rendering
+# targets::tar_make()
 ```
 
 **Windows note**: Accents in file paths can break I/O in some setups. An early `file.exists()` guard is included; if issues arise, move or symlink the raw file to an ASCII path and update `RAW_FILE`.
@@ -231,7 +198,7 @@ testthat::test_dir("tests/testthat", reporter = "summary")
 
 ## Reproducibility {#reproducibility}
 
--   **Docker** image plus **renv** lock ensure deterministic environments.
+-   The renv lock ensures deterministic R package versions; the CI workflow pins a Linux image for reproducible runs.
 -   Global seeds are set where appropriate (`_targets.R` and function scope).
 -   `targets` caches immutable artefacts by hash; rebuilds occur only when inputs change.
 
@@ -263,7 +230,7 @@ testthat::test_dir("tests/testthat", reporter = "summary")
 ## License
 
 -   Code: MIT
--   Synthetic test data only (no real patient data included).
+-   No real patient data is included in this repository.
 
 ------------------------------------------------------------------------
 
