@@ -1,0 +1,559 @@
+---
+title: "ICU Mortality – Bayesian & Frequentist Risk Models"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    theme: cosmo
+editor: visual
+execute:
+  echo: false
+  warning: false
+  message: false
+  cache: false
+  execute-dir: project
+---
+
+## Setup
+
+```{r sanity-core-targets, echo=FALSE, message=FALSE, results='hide'}
+knitr::opts_chunk$set(
+  dev        = "ragg_png",
+  dpi        = 200,
+  fig.retina = 2,
+  fig.width  = 7.2,
+  fig.height = 4.8,
+  fig.align  = "center",
+  out.width  = "100%"
+)
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(gtsummary)
+  library(kableExtra)
+  library(knitr)
+  library(sessioninfo)
+  library(targets)
+  library(tidyr)
+  library(purrr)
+  library(stringr)
+  library(tibble)
+})
+
+
+.project_root <- normalizePath(".", winslash = "/", mustWork = TRUE)
+targets::tar_config_set(
+  store  = file.path(.project_root, "_targets"),
+  script = file.path(.project_root, "_targets.R")
+)
+
+rd <- function(nm) {
+  expr <- rlang::expr(targets::tar_read(!!rlang::sym(nm)))
+  tryCatch(rlang::eval_bare(expr), error = function(e) NULL)
+}
+
+rd_verbose <- function(nm) {
+  expr <- rlang::expr(targets::tar_read(!!rlang::sym(nm)))
+  tryCatch(
+    rlang::eval_bare(expr),
+    error = function(e) { message("rd('", nm, "') failed: ", conditionMessage(e)); NULL }
+  )
+}
+
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
+
+cat("<pre>\n")
+cat("THESIS SANITY\n")
+cat("  wd:     ", normalizePath(getwd(), winslash="/"), "\n", sep = "")
+cat("  store:  ", targets::tar_config_get("store"), "\n", sep = "")
+cat("  script: ", targets::tar_config_get("script"), "\n", sep = "")
+cat("  val_B:  ", paste0(tryCatch(targets::tar_read(val_B), error=function(e) NA), collapse=","), "\n", sep = "")
+cat("  val_H:  ", paste0(tryCatch(targets::tar_read(val_horizon), error=function(e) NA), collapse=", "), "\n", sep = "")
+cat("</pre>\n")
+
+probe <- c(
+  "tables","model_metrics","fig_cif","fig_calib","fig_decision",
+  "pooled_metrics","cindex_td","fig_c_td","group_metrics",
+  "val_allh","val_ckdneg","val_no_small","val_nosmall_refit",
+  "coef_table","cox_ph","mcmc_agree","sens_deltas"
+)
+
+invisible(lapply(probe, function(nm) {
+  obj <- rd_verbose(nm)
+  cat(sprintf("%-20s : %s\n", nm, if (is.null(obj)) "NULL" else paste(class(obj), collapse="/")))
+}))
+
+avail <- tibble::tibble(
+  object = probe,
+  exists = vapply(probe, function(nm) !is.null(rd(nm)), logical(1)),
+  type   = vapply(probe, function(nm) {x <- rd(nm); if (is.null(x)) NA_character_ else class(x)[1]}, character(1)),
+  nrows  = vapply(probe, function(nm) {x <- rd(nm); if (is.data.frame(x)) nrow(x) else NA_integer_}, integer(1))
+)
+knitr::kable(avail, caption = "Which targets are present at render time?")
+
+
+dir.create("figures", recursive = TRUE, showWarnings = FALSE)
+
+export_figure <- function(plot, filename_base, width = 6, height = 4, dpi = 600) {
+  ggplot2::ggsave(paste0(filename_base, ".tiff"), plot, width = width, height = height,
+                  dpi = dpi, compression = "lzw")
+  ggplot2::ggsave(paste0(filename_base, ".png"),  plot, width = width, height = height,
+                  dpi = dpi)
+}
+
+show_and_export <- function(obj, outfile, width = 7.5, height = 5) {
+  if (is.null(obj)) return(invisible(NULL))
+  print(obj)
+  export_figure(obj, outfile, width = width, height = height)
+  invisible(TRUE)
+}
+
+
+summarise_validation_ci <- function(val_obj, label) {
+  if (is.null(val_obj)) return(tibble())
+  boot <- val_obj$bootstrap %||% tibble()
+  temp <- val_obj$temporal  %||% tibble()
+
+  norm <- function(df) {
+    if (is.null(df) || !nrow(df)) return(tibble())
+    if (!"horizon" %in% names(df) && "Horizon" %in% names(df)) {
+      names(df)[names(df) == "Horizon"] <- "horizon"
+    }
+    if (!"model" %in% names(df) && "Model" %in% names(df)) {
+      names(df)[names(df) == "Model"] <- "model"
+    }
+    df
+  }
+  boot <- norm(boot); temp <- norm(temp)
+
+  qfun <- function(x, p) if (all(is.na(x))) NA_real_ else as.numeric(stats::quantile(x, p, na.rm = TRUE, names = FALSE))
+
+  out_boot <- if (nrow(boot)) {
+    boot %>%
+      dplyr::group_by(model, horizon) %>%
+      dplyr::summarise(
+        C_index_mean = mean(c_index, na.rm = TRUE),
+        C_index_lwr  = qfun(c_index, 0.025),
+        C_index_upr  = qfun(c_index, 0.975),
+        Brier_mean   = mean(brier, na.rm = TRUE),
+        Brier_lwr    = qfun(brier, 0.025),
+        Brier_upr    = qfun(brier, 0.975),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(split = "Bootstrap")
+  } else tibble()
+
+  out_temp <- if (nrow(temp)) {
+    temp %>%
+      dplyr::transmute(
+        model, horizon,
+        C_index_mean = c_index, C_index_lwr = NA_real_, C_index_upr = NA_real_,
+        Brier_mean   = brier,   Brier_lwr   = NA_real_, Brier_upr   = NA_real_,
+        split = "Temporal"
+      )
+  } else tibble()
+
+  dplyr::bind_rows(out_boot, out_temp) %>%
+    dplyr::mutate(source = label, .before = 1L) %>%
+    dplyr::arrange(split, horizon, model)
+}
+
+# Compact CI formatter (e.g., 0.731 [0.702–0.759])
+fmt_ci <- function(m, l, u, digits = 3) {
+  if (!is.finite(m)) return(NA_character_)
+  if (!is.finite(l) || !is.finite(u)) return(formatC(m, digits = digits, format = "f"))
+  paste0(formatC(m, digits = digits, format = "f"),
+         " [", formatC(l, digits = digits, format = "f"),
+         "–", formatC(u, digits = digits, format = "f"), "]")
+}
+
+extract_val_meta <- function(x) {
+  if (is.null(x)) return(NULL)
+  seeds <- attr(x, "bootstrap_seeds")
+  horizons <- sort(unique(c((x$bootstrap$horizon %||% numeric()),
+                            (x$temporal$horizon  %||% numeric()))))
+  list(B = length(seeds %||% integer(0)), horizons = horizons)
+}
+```
+
+```{r thesis-sanity, echo=FALSE}
+cat("<pre>\n")
+cat("THESIS SANITY\n")
+cat("  wd:     ", normalizePath(getwd(), winslash="/"), "\n", sep = "")
+cat("  store:  ", targets::tar_config_get("store"), "\n", sep = "")
+cat("  script: ", targets::tar_config_get("script"), "\n", sep = "")
+cat("  val_B:  ", paste0(tryCatch(targets::tar_read(val_B), error=function(e) NA), collapse=","), "\n", sep = "")
+cat("  val_H:  ", paste0(tryCatch(targets::tar_read(val_horizon), error=function(e) NA), collapse=", "), "\n", sep = "")
+cat("</pre>\n")
+```
+
+## Parameters and Provenance
+
+```{r}
+val_B       <- targets::tar_read(val_B)
+val_horizon <- targets::tar_read(val_horizon)
+mi_m        <- targets::tar_read(mi_m)
+cp_list     <- targets::tar_read(cp_list)
+
+
+param_tbl <- tibble::tibble(
+  Parameter = c("Bootstrap replicates (B)", "Evaluation horizons (days)", "Imputations (m)", "Imputations available"),
+  Value     = c(
+    as.character(val_B %||% NA_integer_),
+    paste(val_horizon %||% numeric(), collapse = ", "),
+    as.character(mi_m %||% NA_integer_),
+    as.character(length(cp_list %||% list()))
+  )
+)
+
+knitr::kable(param_tbl, caption = "Run parameters (sourced from _targets.R).") |>
+  kableExtra::kable_styling(full_width = FALSE)
+
+exp_B <- rd("val_B")
+exp_H <- rd("val_horizon")
+
+val_names <- c("val_allh", "val_results_cluster", "val_no_small",
+               "val_ckdneg", "val_nosmall_refit")
+
+same_num_vec <- function(a, b, tol = 1e-9) {
+  if (is.null(a) || is.null(b)) return(NA)
+  a <- as.numeric(a); b <- as.numeric(b)
+  length(a) == length(b) && all(abs(sort(unique(a)) - sort(unique(b))) < tol)
+}
+
+get_info <- function(nm) {
+  x <- rd(nm)
+  if (is.null(x)) {
+    return(tibble::tibble(
+      Object = nm, B = NA_integer_, OK_B = NA,
+      Horizons_used = NA_character_, OK_horizons = NA
+    ))
+  }
+  h <- sort(unique(c(
+    tryCatch(x$bootstrap$horizon, error = function(e) numeric()),
+    tryCatch(x$temporal$horizon,  error = function(e) numeric())
+  )))
+  B_used <- {
+    s <- attr(x, "bootstrap_seeds")
+    if (!is.null(s)) length(s) else
+      tryCatch(length(unique(x$bootstrap$split)), error = function(e) NA_integer_)
+  }
+  tibble::tibble(
+    Object = nm,
+    B = as.integer(B_used),
+    OK_B = if (length(exp_B) == 1 && is.finite(exp_B)) (as.integer(B_used) == as.integer(exp_B)) else NA,
+    Horizons_used = if (length(h)) paste(h, collapse = ", ") else NA_character_,
+    OK_horizons = if (!is.null(exp_H) && length(exp_H)) same_num_vec(h, exp_H) else NA
+  )
+}
+
+sanity_tbl <- purrr::map_dfr(val_names, get_info)
+knitr::kable(sanity_tbl, caption = "Validation parameter sanity check (B and horizons).")
+```
+
+## Tables
+
+```{r setup, echo=FALSE}
+tables <- rd("tables")  # now works with the fixed rd()
+
+# If the target stores a file path (format = "file"), load it:
+if (is.character(tables) && length(tables) == 1 && file.exists(tables)) {
+  tables <- readRDS(tables)
+}
+
+if (is.list(tables)) {
+  if (!is.null(tables$baseline_by_outcome)) print(tables$baseline_by_outcome)
+  if (!is.null(tables$overall_cohort))      print(tables$overall_cohort)
+} else {
+  # Temporary debug line (remove once you see content)
+  cat("tables is a ", paste(class(tables), collapse="/"), "\n")
+}
+```
+
+## Model Selection/diagnostics
+
+```{r}
+model_metrics <- rd("model_metrics")
+if (!is.null(model_metrics) && !is.null(model_metrics$pooled)) {
+  mm <- model_metrics$pooled
+  knitr::kable(
+    mm,
+    digits = 2,
+    caption = "Model–selection criteria and centre random-effect variance."
+  ) |>
+    kableExtra::kable_styling(full_width = FALSE) |>
+    kableExtra::footnote(
+      general = paste(
+        "INLA reports DIC/WAIC; Cox frailty reports log-likelihood, AIC/BIC.",
+        "Fine–Gray uses FGR when censoring is present and crr otherwise;",
+        "centre variance is NA for engines without a centre-level RE."
+      ),
+      threeparttable = TRUE
+    )
+
+  if (!is.null(model_metrics$per_imputation)) {
+    knitr::kable(
+      model_metrics$per_imputation,
+      digits = 2,
+      caption = "Per-imputation diagnostics (light summary)."
+    )
+  }
+}
+```
+
+## Primary Figures
+
+```{r, echo=FALSE, fig.width=8.8, fig.height=5.6}
+fig_cif      <- rd("fig_cif")
+fig_calib    <- rd("fig_calib")
+fig_decision <- rd("fig_decision")
+
+show_and_export(fig_cif,      "figures/fig_cif",      width = 6,   height = 4)
+show_and_export(fig_calib,    "figures/fig_calib",    width = 7.5, height = 5.6)
+show_and_export(fig_decision, "figures/fig_decision", width = 7.5, height = 5.6)
+
+```
+
+## Pooled Metrics
+
+```{r}
+pooled_metrics <- rd("pooled_metrics")
+if (!is.null(pooled_metrics)) {
+  knitr::kable(
+    pooled_metrics |> dplyr::arrange(Horizon, model),
+    digits = 3,
+    caption = "Pooled C-index (AUC) and Brier by horizon (mean over imputations)."
+  )
+}
+
+cindex_td <- rd("cindex_td")
+if (!is.null(cindex_td)) {
+  knitr::kable(
+    cindex_td,
+    digits = 3,
+    caption = "Time-dependent C-index by horizon (pooled over imputations)."
+  )
+}
+
+fig_c_td <- rd("fig_c_td")
+if (!is.null(fig_c_td)) {
+  print(fig_c_td)
+  export_figure(fig_c_td, "figures/fig_c_td", width = 6, height = 3.5)
+}
+
+```
+
+## Stratified Performance by centre
+
+```{r}
+group_metrics <- rd("group_metrics")
+
+if (!is.null(group_metrics) && length(group_metrics$pooled) > 0) {
+  cat("### C-index/Brier by centre and horizon\n")
+  print(
+    group_metrics$pooled |>
+      dplyr::arrange(study_grp, Horizon, model) |>
+      knitr::kable(digits = 3,
+                   caption = "Stratified (by study_grp) C-index & Brier — mean across imputations.")
+  )
+}
+
+if (!is.null(group_metrics) && nrow(group_metrics$pooled) > 0) {
+  ggplot2::ggplot(
+    dplyr::filter(group_metrics$pooled, is.finite(AUC)),
+    ggplot2::aes(Horizon, AUC, colour = model, group = model)
+  ) +
+    ggplot2::geom_hline(yintercept = 0.5, linetype = "dashed", linewidth = 0.4) +
+    ggplot2::geom_point(size = 1.6) +
+    ggplot2::geom_line(linewidth = 0.7, alpha = 0.9) +
+    ggplot2::scale_x_continuous(breaks = sort(unique(group_metrics$pooled$Horizon))) +
+    ggplot2::facet_wrap(~ study_grp, ncol = 2) +
+    ggplot2::theme_bw(base_size = 9) +
+    ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
+                   legend.position = "bottom") +
+    ggplot2::labs(title = "C-index by centre and horizon", x = "Days", y = "C-index", colour = NULL)
+}
+
+```
+
+## Validation (Primary Models)
+
+```{r}
+val_allh <- rd("val_allh")
+if (!is.null(val_allh)) {
+  v <- summarise_validation_ci(val_allh, "Primary")
+  if (nrow(v)) {
+    v_disp <- v %>%
+      dplyr::mutate(
+        `C-index` = fmt_ci(C_index_mean, C_index_lwr, C_index_upr),
+        `Brier`   = fmt_ci(Brier_mean,   Brier_lwr,   Brier_upr)
+      ) %>%
+      dplyr::select(split, model, Horizon = horizon, `C-index`, Brier)
+    knitr::kable(v_disp, align = "l",
+                 caption = "Validation — primary models (Rubin pooled; bootstrap percentile CIs).")
+  }
+}
+
+```
+
+## Sensitivity – CKD-negative (eGFR ≥ 60)
+
+```{r}
+val_ckdneg <- rd("val_ckdneg")
+if (!is.null(val_ckdneg)) {
+  v <- summarise_validation_ci(val_ckdneg, "CKD-negative")
+  if (nrow(v)) {
+    v_disp <- v %>%
+      dplyr::mutate(
+        `C-index` = fmt_ci(C_index_mean, C_index_lwr, C_index_upr),
+        `Brier`   = fmt_ci(Brier_mean,   Brier_lwr,   Brier_upr)
+      ) %>%
+      dplyr::select(split, model, Horizon = horizon, `C-index`, Brier)
+    knitr::kable(v_disp, align = "l",
+                 caption = "Sensitivity — CKD-negative subset (Rubin pooled; bootstrap percentile CIs).")
+  }
+}
+
+```
+
+## Sensitivity – exclude “Merged-small-sites” (prediction only)
+
+```{r}
+val_no_small <- rd("val_no_small")
+if (!is.null(val_no_small)) {
+  v <- summarise_validation_ci(val_no_small, "No merged-small-sites (prediction only)")
+  if (nrow(v)) {
+    v_disp <- v %>%
+      dplyr::mutate(
+        `C-index` = fmt_ci(C_index_mean, C_index_lwr, C_index_upr),
+        `Brier`   = fmt_ci(Brier_mean,   Brier_lwr,   Brier_upr)
+      ) %>%
+      dplyr::select(split, model, Horizon = horizon, `C-index`, Brier)
+    knitr::kable(v_disp, align = "l",
+                 caption = "Sensitivity — excluding 'Merged-small-sites' from validation set (Rubin pooled; bootstrap percentile CIs).")
+  }
+}
+
+```
+
+## Sensitivity – refit without “Merged-small-sites”
+
+```{r}
+val_nosmall_refit <- rd("val_nosmall_refit")
+if (!is.null(val_nosmall_refit)) {
+  v <- summarise_validation_ci(val_nosmall_refit, "No merged-small-sites (refit)")
+  if (nrow(v)) {
+    v_disp <- v %>%
+      dplyr::mutate(
+        `C-index` = fmt_ci(C_index_mean, C_index_lwr, C_index_upr),
+        `Brier`   = fmt_ci(Brier_mean,   Brier_lwr,   Brier_upr)
+      ) %>%
+      dplyr::select(split, model, Horizon = horizon, `C-index`, Brier)
+    knitr::kable(v_disp, align = "l",
+                 caption = "Sensitivity — models refit without 'Merged-small-sites' (Rubin pooled; bootstrap percentile CIs).")
+  }
+}
+
+```
+
+## Proportional hazards diagnostics (Cox)
+
+```{r}
+cox_ph <- rd("cox_ph")
+
+cols_ok <- !is.null(cox_ph) && all(c(".imp","term","chisq","p") %in% names(cox_ph))
+
+if (cols_ok && nrow(cox_ph)) {
+  ph_global <- cox_ph |>
+    dplyr::filter(term == "GLOBAL") |>
+    dplyr::summarise(
+      chisq_med = stats::median(chisq, na.rm = TRUE),
+      p_med     = stats::median(p, na.rm = TRUE),
+      p_min     = min(p, na.rm = TRUE),
+      p_max     = max(p, na.rm = TRUE)
+    )
+  print(knitr::kable(ph_global,
+    caption = "Proportional hazards global test across imputations (median; range in p)."))
+
+  ph_terms <- cox_ph |>
+    dplyr::filter(term != "GLOBAL") |>
+    dplyr::group_by(term) |>
+    dplyr::summarise(
+      p_med = stats::median(p, na.rm = TRUE),
+      p_min = min(p, na.rm = TRUE),
+      p_max = max(p, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    dplyr::arrange(p_med)
+  if (nrow(ph_terms)) {
+    print(knitr::kable(ph_terms, caption = "PH checks by term: median p (and range) across imputations."))
+  }
+} else {
+  cat("PH diagnostics unavailable or empty (no eligible covariates / models).\n")
+}
+```
+
+## Coefficient summaries
+
+```{r}
+coef_table <- rd("coef_table")
+if (!is.null(coef_table)) {
+  print(knitr::kable(
+    coef_table,
+    caption = "Hazard ratio summaries (pooled across imputations); Holm-adjusted p-values."
+  ))
+}
+```
+
+## INLA vs MCMC agreement
+
+```{r}
+ag <- rd("mcmc_agree")
+if (!is.null(ag)) {
+  knitr::kable(ag$summary, digits = 3, caption = "INLA–MCMC parameter comparison")
+  knitr::kable(ag$agreement$per_term, digits = 3, caption = "LP agreement by term")
+}
+```
+
+## Sensitivity scenario deltas
+
+```{r}
+sens_deltas <- rd("sens_deltas")
+if (!is.null(sens_deltas) && length(sens_deltas)) {
+  for (nm in names(sens_deltas)) {
+    x <- sens_deltas[[nm]]
+    cat("### Sensitivity –", x$name, "\n\n")
+    if (!is.null(x$notes)) cat("*", x$notes, "*\n\n")
+    if (!is.null(x$deltas) && (is.data.frame(x$deltas) || is.matrix(x$deltas))) {
+      print(knitr::kable(
+        x$deltas, digits = 2,
+        caption = paste("Metric deltas vs primary –", nm)
+      ))
+    }
+    cat("\n\n")
+  }
+}
+```
+
+## Session information
+
+```{r}
+sessioninfo::session_info()
+```
+
+## Appendix: INLA interval event counts
+
+```{r}
+bayes_list <- rd("bayes_list")
+if (!is.null(bayes_list) &&
+    length(bayes_list) >= 1 &&
+    !is.null(bayes_list[[1]]$death$cuts) &&
+    !is.null(attr(bayes_list[[1]]$death$cuts, "interval_counts"))) {
+  print(knitr::kable(
+    attr(bayes_list[[1]]$death$cuts, "interval_counts"),
+    caption = "Interval event counts used by INLA (imputation 1)."
+  ))
+}
+```
