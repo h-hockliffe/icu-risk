@@ -48,7 +48,6 @@ Includes a `targets` pipeline, Quarto report, Docker image, GitHub Actions CI, a
 ├── tests/
 │   ├── testthat.R
 │   └── testthat/...
-├── Dockerfile
 ├── renv.lock
 └── README.md
 ```
